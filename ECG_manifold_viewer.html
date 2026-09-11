@@ -1,0 +1,1217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECG Manifold Viewer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  :root {
+    --bg:       #f4f6f9;
+    --surface:  #ffffff;
+    --surface2: #eef1f5;
+    --border:   #d0d6e0;
+    --border2:  #b8c0cc;
+    --text:     #1a1f2e;
+    --muted:    #5c6780;
+    --accent:   #0077cc;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding: 10px 24px; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .header-left { min-width: 0; }
+  .logo { font-size: 12px; font-weight: 800; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
+  .data-footer {
+    padding: 8px 24px; border-top: 1px solid var(--border);
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted);
+    line-height: 1.6; flex-shrink: 0;
+  }
+  .data-footer p { margin: 0 0 4px; }
+  .data-footer p:last-child { margin-bottom: 0; }
+  .data-footer a { color: var(--accent); }
+  .data-footer .disclaimer { color: var(--text); font-weight: 600; }
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); }
+  .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .load-new-btn {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    padding: 7px 12px; background: var(--surface2); border: 1px solid var(--border2);
+    color: var(--muted); cursor: pointer; border-radius: 4px;
+    text-align: center; transition: all 0.15s; white-space: nowrap; flex-shrink: 0;
+  }
+  .load-new-btn:hover { border-color: #cc4400; color: #cc4400; background: #fff0eb; }
+  .record-select {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    padding: 7px 10px; background: var(--surface2); border: 1px solid var(--border2);
+    color: var(--text); cursor: pointer; border-radius: 4px;
+    flex-shrink: 0; max-width: 160px;
+  }
+  .record-select:hover { border-color: var(--accent); }
+  .folder-link { text-decoration: underline; cursor: pointer; }
+  .folder-link:hover { color: var(--accent); }
+
+  /* ── Content column (full width now that the sidebar is gone) ── */
+  .content-col {
+    flex: 1;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Main grid: embeddings sit in a 1x4 row spanning the full grid
+     height (t-SNE lead A, t-SNE lead B, UMAP lead A, UMAP lead B); the
+     heartbeat column is narrower than the embeddings and its plot is
+     visually capped smaller (see .beat-plot-inner) so it reads as a
+     compact companion panel rather than competing for space.
+     Height is set in JS (fitMainGridHeight) to exactly match what the
+     embedding squares need at the current column width — no leftover
+     dead space above/below them — and whatever height that frees up
+     goes to the strips section below (flex: 1). 300px is just an
+     unstyled fallback before the first fit runs. ── */
+  .main-grid {
+    flex: 0 0 300px;
+    display: grid;
+    grid-template-columns: 1.1fr 1.1fr 1.1fr 1.1fr 0.6fr;
+    grid-template-rows: repeat(2, 1fr);
+    gap: 1px;
+    background: var(--border2);
+    overflow: hidden;
+    border-bottom: 2px solid var(--border2);
+  }
+  .embed-cell {
+    background: var(--surface);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  /* Embedding cells span both rows so each one gets the grid's full height. */
+  .embed-span { grid-row: span 2; }
+  .embed-cell-header {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 4px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    background: var(--surface);
+  }
+  .embed-cell-title {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Wrap centers the square plot canvas within whatever rectangular space
+     the grid cell happens to have — the plot itself is always drawn square
+     with a true 1:1 data aspect ratio (see buildScatterCell). */
+  .embed-svg-wrap {
+    flex: 1; overflow: hidden; background: var(--surface2);
+    display: flex; align-items: center; justify-content: center;
+    padding: 10px;
+  }
+  .embed-svg-wrap svg { width: 100%; height: 100%; display: block; }
+  /* Heartbeat plot: shifted to the top of its cell (not vertically centered)
+     so any leftover room falls below it rather than around it, and sized a
+     bit smaller than a full-bleed fill so it stays visually compact next to
+     the larger embeddings. */
+  .beat-plot-wrap {
+    flex: 1; background: var(--surface2); overflow: hidden;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 10px; gap: 6px;
+  }
+  .beat-plot-inner { width: 92%; height: 70%; background: #fff; overflow: hidden; flex-shrink: 0; }
+  .beat-plot-label {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--muted); text-align: center;
+  }
+
+  /* ── Strips: two ECG strips stacked — grows to absorb whatever viewport
+     space isn't used by the (now fixed-height) grid above. ── */
+  .strips-section {
+    flex: 1;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    min-height: 260px;
+  }
+  .strip-cell {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    border-bottom: 1px solid var(--border2);
+  }
+  .strip-cell:last-child { border-bottom: none; }
+  .strip-plot-wrap { flex: 1; background: #fff; overflow-x: auto; overflow-y: hidden; cursor: grab; }
+  .strip-plot-wrap:active { cursor: grabbing; }
+
+  /* ── Panel header (reused inside strip cells) ── */
+  .panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 14px; border-bottom: 1px solid var(--border);
+    background: var(--surface); flex-shrink: 0;
+  }
+  .panel-title { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .panel-hint  { font-family: 'JetBrains Mono', monospace; font-size: 8.5px; color: var(--muted); }
+
+  /* ── No-data placeholder ── */
+  .no-data {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; width: 100%; height: 100%;
+    color: var(--border2); font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  }
+  .no-data-icon {
+    width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; color: var(--border);
+  }
+
+  /* ── Overlays ── */
+  .loading-overlay {
+    position: fixed; inset: 0; background: var(--surface);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 20px; z-index: 100;
+  }
+  .loading-title { font-size: 18px; font-weight: 800; letter-spacing: 0.1em; color: var(--accent); }
+  .loading-bar-track { width: 280px; height: 2px; background: var(--border); border-radius: 1px; overflow: hidden; }
+  .loading-bar-fill  { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+  .loading-msg { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+
+  .file-overlay {
+    position: fixed; inset: 0; background: var(--surface);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 16px; z-index: 100;
+  }
+  .file-drop-zone {
+    border: 1.5px dashed var(--border2); border-radius: 10px;
+    padding: 40px 60px; text-align: center; cursor: pointer; transition: all 0.2s; background: var(--surface2);
+  }
+  .file-drop-zone:hover, .file-drop-zone.drag-over { border-color: var(--accent); background: #e8f0fa; }
+  .file-drop-zone input[type=file] { display: none; }
+  .drop-label { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .drop-sub   { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+  .drop-icon  { font-size: 28px; margin-bottom: 12px; }
+
+  .tooltip {
+    position: fixed; pointer-events: none;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 4px; padding: 5px 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--text); z-index: 50; opacity: 0; transition: opacity 0.12s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  }
+</style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="loading-title">ECG MANIFOLD VIEWER</div>
+  <div class="loading-bar-track"><div class="loading-bar-fill" id="load-bar"></div></div>
+  <div class="loading-msg" id="load-msg">Initializing…</div>
+</div>
+
+<!-- File picker overlay -->
+<div class="file-overlay" id="file-picker" style="display:none;">
+  <div style="font-size:20px;font-weight:800;letter-spacing:0.1em;color:var(--accent);margin-bottom:8px;">ECG MANIFOLD VIEWER</div>
+  <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:24px;">Load your .json file to begin</div>
+  <div class="file-drop-zone" id="drop-zone">
+    <input type="file" id="file-input" accept=".json" multiple>
+    <div class="drop-icon">♡</div>
+    <div class="drop-label">Drop .json file(s) or a whole folder here</div>
+    <div class="drop-sub">or click to browse (select multiple) &middot; <span class="folder-link" id="folder-picker-link">select a folder</span></div>
+  </div>
+  <input type="file" id="folder-input" webkitdirectory style="display:none;">
+  <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--muted);margin-top:18px;max-width:520px;text-align:center;line-height:1.8;">
+    expects: fs, available_leads, signal_data, heartbeats_data, r_peaks, aami_labels, embeddings<br>
+    drop one file, several files, or an entire folder (e.g. a <code>json/</code> folder of
+    per-record exports) — a record dropdown appears in the header when there's more than
+    one, defaulting to record 100 if present
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<header>
+  <div class="header-left">
+    <div class="logo">ECG Manifold Viewer</div>
+    <div class="subtitle" id="data-info">hover over points to inspect beats</div>
+  </div>
+  <div class="legend" id="legend"></div>
+  <select class="record-select" id="record-select" style="display:none;" title="Switch record"></select>
+  <button class="load-new-btn" id="load-new-btn">↩ Load new data</button>
+</header>
+
+<div class="content-col">
+
+  <!-- 2 rows (leads) x 3 columns: t-SNE, UMAP, Segmented Beat -->
+  <div class="main-grid" id="main-grid"></div>
+
+  <!-- Two ECG strips, one per lead, given generous height below the grid -->
+  <div class="strips-section" id="strips-grid"></div>
+
+  <footer class="data-footer" id="data-footer">
+    <p>
+      Data: MIT-BIH Arrhythmia Database, distributed by PhysioNet under the Open Data Commons
+      Attribution License v1.0 &mdash; Moody &amp; Mark, <em>IEEE Eng. Med. Biol.</em> 20(3):45&ndash;50 (2001);
+      Goldberger et al., <em>Circulation</em> 101(23):e215&ndash;e220 (2000). Full citation &amp; license terms:
+      <a href="https://physionet.org/content/mitdb/" target="_blank" rel="noopener">physionet.org/content/mitdb</a>.
+      This site's visualizations contain information from the MIT-BIH Arrhythmia Database, made available under the
+      <a href="https://opendatacommons.org/licenses/by/1-0/" target="_blank" rel="noopener">ODC Attribution License</a>.
+    </p>
+    <p class="disclaimer">
+      ⚠ Not a diagnostic tool. For research &amp; education only &mdash; not a medical device, and not
+      to be used to diagnose, treat, or guide decisions for any real patient.
+    </p>
+  </footer>
+
+</div><!-- end content-col -->
+
+<script>
+// ─── Constants ────────────────────────────────────────────────────────────────
+// FS, WIN_SAMP come from the loaded data (data.fs) — see setDerivedConstants()
+let FS       = 360;
+const WIN_SEC   = 15;              // ±15s around the R-peak, scrollable within that window
+let WIN_SAMP    = WIN_SEC * FS;    // recomputed once fs is known
+const STRIP_PX_PER_SEC = 90;       // horizontal zoom level of the scrollable ECG strip
+
+// Class full names — no prefixes, just the name
+const CLASSES = [
+  'Normal Beat',
+  'Ventricular Ectopic Beat',
+  'Supraventricular Ectopic Beat',
+  'Fusion Beat',
+  'Unknown Beat',
+  'Others'
+];
+// Badge: short label shown in small space
+const BADGE_LABELS = ['Normal','VEB','SVEB','Fusion','Unknown','Others'];
+
+// Legend: same as CLASSES (no abbreviation prefix)
+const LEG_LABELS = CLASSES;
+
+const COLORS   = ['#00a846','#2060e0','#e02020','#8800dd','#e06000','#0099bb'];
+
+// Generic 12-lead display names (utils.py's STANDARD_12_LEAD_ORDER)
+const LEAD_FULL_NAMES = {
+  I: 'Lead I', II: 'Lead II', III: 'Lead III',
+  AVR: 'Lead aVR', AVL: 'Lead aVL', AVF: 'Lead aVF',
+  V1: 'Lead V1', V2: 'Lead V2', V3: 'Lead V3',
+  V4: 'Lead V4', V5: 'Lead V5', V6: 'Lead V6',
+};
+
+// The three projection methods, always shown together (3 rows of the grid)
+const PROJS = ['tsne', 'umap'];
+
+// ─── Utility: format seconds nicely ─────────────────────────────────────────
+function fmtSec(samples) {
+  return (samples / FS).toFixed(3) + ' s';
+}
+
+function projLabelFor(proj) {
+  return proj === 'tsne' ? 't-SNE' : proj.toUpperCase();
+}
+
+// Human-readable label for a lead, e.g. "Lead II" — kept to the canonical
+// slot name everywhere (no "(from MLII)" annotation) for consistency across
+// the header, embedding titles, heartbeat titles, and strip titles.
+function leadDisplayName(lead) {
+  return LEAD_FULL_NAMES[lead] || `Lead ${lead}`;
+}
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let data      = null;
+let activeIdx = null;
+let LEADS     = [];   // the (up to) two leads currently visualized, set from data.available_leads
+let scatterCells = {}; // key `${proj}_${leadIndex}` -> { ring, xScale, yScale, embed }
+let recordFiles = {};      // recordId (string, from filename) -> File, for all .json files
+                            // currently loaded (single drop, multi-select, or a whole folder)
+let currentRecordId = null; // which recordFiles key is currently displayed
+
+// ─── Data helpers ─────────────────────────────────────────────────────────────
+// Schema (dict-of-lead access, mirrors utils.py's LeadArray):
+//   data.signal_data[lead]        -> flat array, length T
+//   data.heartbeats_data[lead]    -> array of N arrays, each length window_len
+//   data.embeddings[method][lead] -> array of N [x, y] pairs
+//   data.r_peaks                  -> array of N sample indices, aligned with heartbeats
+//   data.aami_labels              -> array of N labels, aligned with heartbeats
+function getEmbedding(proj, lead) { return data.embeddings[proj][lead]; }
+function getRpeak(i) { return data.r_peaks[i]; }
+
+// Segment boundaries (lead-independent — every lead shares the same R-peaks):
+//   seg_start = rp - round((rp - prev_rp) / 3)
+//   seg_end   = rp + round(2 * (next_rp - rp) / 3)
+function getSegBounds(beatIdx) {
+  const rpeaks = data.r_peaks;
+  const n      = rpeaks.length;
+  const rp     = rpeaks[beatIdx];
+  const prev_rp = beatIdx > 0     ? rpeaks[beatIdx - 1] : rp;
+  const next_rp = beatIdx < n - 1 ? rpeaks[beatIdx + 1] : rp;
+  const seg_start = rp - Math.round((rp - prev_rp) / 3);
+  const seg_end   = rp + Math.round(2 * (next_rp - rp) / 3);
+  return { seg_start, seg_end };
+}
+
+// Extract ±WIN_SAMP samples from the continuous signal around the R-peak, for one lead.
+function getStrip(lead, beatIdx) {
+  const rp    = getRpeak(beatIdx);
+  const sig   = data.signal_data[lead];
+  const nRows = sig.length;
+
+  const start  = Math.max(0, rp - WIN_SAMP);
+  const end    = Math.min(nRows - 1, rp + WIN_SAMP);
+  const offset = rp - start;   // index of R-peak inside the strip array
+
+  const strip = sig.slice(start, end + 1);
+  return { strip, offset, startSample: start, rpeakSample: rp };
+}
+
+// Set FS / WIN_SAMP from the loaded data.
+function setDerivedConstants() {
+  FS = data.fs || 360;
+  WIN_SAMP = WIN_SEC * FS;
+}
+
+// ─── Layout construction (embeddings grid + beat/strip panels) ────────────────
+// Leads are fixed once data loads (first two of data.available_leads), so all
+// titles are set once here rather than toggled by sidebar controls.
+function buildLeadsAndLayout() {
+  const leads = data.available_leads || Object.keys(data.signal_data || {});
+  LEADS = leads.slice(0, 2);
+  buildMainGridDom();
+  fitMainGridHeight();
+  buildStripsGridDom();
+  buildHeaderInfo();
+}
+
+// Sets the grid's height to exactly what the embedding squares need at the
+// current column width (header height + column width), instead of an
+// arbitrary fixed value that leaves dead space above/below the squares.
+// Column width doesn't depend on row height in CSS Grid, so this can be
+// measured immediately after the DOM is built, before anything is drawn.
+function fitMainGridHeight() {
+  const grid = document.getElementById('main-grid');
+  if (!grid) return;
+  const firstSpan = grid.querySelector('.embed-span');
+  if (!firstSpan) return;
+  const header = firstSpan.querySelector('.embed-cell-header');
+  const wrap = firstSpan.querySelector('.embed-svg-wrap');
+  if (!header || !wrap) return;
+  const colWidth = wrap.getBoundingClientRect().width;
+  const headerH = header.getBoundingClientRect().height;
+  if (!colWidth) return;
+  grid.style.flexBasis = Math.round((headerH + colWidth) * 1.12) + 'px';
+}
+
+// Embeddings now form a single row of 4 (t-SNE lead A, t-SNE lead B,
+// UMAP lead A, UMAP lead B), each cell spanning the grid's full height —
+// CSS grid auto-placement lays this out correctly purely from DOM order,
+// as long as the embedding cells come first and use .embed-span.
+// The heartbeat column is unchanged: still one cell per lead, one row each.
+function buildMainGridDom() {
+  const container = document.getElementById('main-grid');
+  container.innerHTML = '';
+
+  PROJS.forEach(proj => {
+    LEADS.forEach((lead, li) => {
+      const cell = document.createElement('div');
+      cell.className = 'embed-cell embed-span';
+      cell.innerHTML = `
+        <div class="embed-cell-header">
+          <div class="embed-cell-title">${projLabelFor(proj)} · ${leadDisplayName(lead)}</div>
+        </div>
+        <div class="embed-svg-wrap"><svg id="embed-svg-${proj}-${li}"></svg></div>
+      `;
+      container.appendChild(cell);
+    });
+  });
+
+  LEADS.forEach((lead, li) => {
+    const beatCell = document.createElement('div');
+    beatCell.className = 'embed-cell';
+    beatCell.innerHTML = `
+      <div class="embed-cell-header">
+        <div class="embed-cell-title">Segmented Beat · ${leadDisplayName(lead)}</div>
+      </div>
+      <div class="beat-plot-wrap">
+        <div class="beat-plot-inner" id="beat-container-${li}">
+          <div class="no-data"><div class="no-data-icon">♡</div><span>Hover over a point</span></div>
+        </div>
+        <div class="beat-plot-label" id="beat-class-${li}">—</div>
+      </div>
+    `;
+    container.appendChild(beatCell);
+  });
+}
+
+function buildStripsGridDom() {
+  const container = document.getElementById('strips-grid');
+  container.innerHTML = '';
+  LEADS.forEach((lead, li) => {
+    const cell = document.createElement('div');
+    cell.className = 'strip-cell';
+    cell.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">ECG Strip ± ${WIN_SEC} s · ${leadDisplayName(lead)}</div>
+        <div class="panel-hint" id="strip-hint-${li}">fs = ${FS} Hz · shaded = segmented beat · drag or scroll to pan</div>
+      </div>
+      <div class="strip-plot-wrap" id="strip-container-${li}">
+        <div class="no-data"><div class="no-data-icon">♡</div><span>Hover over a point</span></div>
+      </div>
+    `;
+    container.appendChild(cell);
+  });
+}
+
+// Dataset stats now live in the header subtitle (no sidebar) — sampling
+// rate, beat count, leads, and any available age/sex metadata.
+function buildHeaderInfo() {
+  const meta = data.metadata || {};
+  const nBeats = (data.r_peaks && data.r_peaks.length) || (data.aami_labels && data.aami_labels.length) || 0;
+  const leadsStr = `Leads [${LEADS.join(', ')}]`;
+  let extra = '';
+  if (meta.age !== undefined && meta.age !== null) extra += ` · age ${meta.age}`;
+  if (meta.sex_text) extra += ` · sex ${meta.sex_text}`;
+  document.getElementById('data-info').textContent =
+    `${nBeats.toLocaleString()} beats · ${leadsStr} · fs ${FS} Hz${extra}`;
+}
+
+// ─── Loading helpers ──────────────────────────────────────────────────────────
+function setLoad(pct, msg) {
+  document.getElementById('load-bar').style.width = pct + '%';
+  document.getElementById('load-msg').textContent = msg;
+}
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+// Load order: (1) an auto-discovered json/ folder sitting next to this file
+// (works when served over http/https, using the server's directory listing —
+// see discoverJsonFolder), (2) a single ecg_data.json next to this file
+// (old single-record behavior), (3) manual file picker as a last resort
+// (e.g. when opened directly as a file:// page, where neither fetch nor a
+// directory listing is available).
+(function init() {
+  setLoad(10, 'Looking for a json/ folder…');
+  discoverJsonFolder()
+    .then(entries => {
+      if (!entries || !entries.length) throw new Error('no json/ folder found');
+      setLoad(50, `Found ${entries.length} record${entries.length === 1 ? '' : 's'} in json/…`);
+      recordFiles = {};
+      entries.forEach(({ id, url }) => { recordFiles[id] = { url }; });
+      const ids = sortRecordIds(Object.keys(recordFiles));
+      buildRecordSelector(ids);
+      document.getElementById('file-picker').style.display = 'none';
+      return loadRecordById(recordFiles['100'] ? '100' : ids[0]);
+    })
+    .catch(() => {
+      setLoad(10, 'Looking for ecg_data.json…');
+      fetch('ecg_data.json')
+        .then(r => { if (!r.ok) throw new Error('not found'); return r.json(); })
+        .then(d => { setLoad(80, 'Parsing data…'); setTimeout(() => loadData(d), 50); })
+        .catch(() => {
+          document.getElementById('loading-overlay').style.display = 'none';
+          document.getElementById('file-picker').style.display = 'flex';
+          setupFilePicker();
+        });
+    });
+})();
+
+// Tries to auto-discover *.json files inside a json/ folder next to this
+// page by fetching the folder's directory listing and scraping the .json
+// links out of it. This works out of the box with the autoindex pages that
+// static servers generate for a directory with no index.html — e.g.
+// `python3 -m http.server`, VS Code's "Live Server", or `npx http-server` —
+// as long as this HTML file and the json/ folder are served from the same
+// place. It will NOT work if the page is opened directly as a file:// URL
+// (browsers block that for security) or if the server has directory
+// listings disabled; in either case this rejects and init() falls back to
+// the old behavior.
+// Tries to auto-discover the *.json record files inside a json/ folder next
+// to this page. Two strategies, tried in order:
+//
+//  1. json/manifest.json — a small file listing the record filenames, e.g.
+//     ["100.json","101.json"]. This is the strategy that works on GitHub
+//     Pages (and any plain static host), since those hosts don't expose a
+//     browsable directory listing. Generate/refresh this file with the
+//     included make_manifest.py any time you add or remove records, then
+//     commit it alongside the json/ folder.
+//  2. A live directory listing at json/ — this works out of the box (no
+//     manifest needed) when running via a local static server that
+//     auto-generates index pages, e.g. `python3 -m http.server`.
+//
+// If neither works (e.g. opened directly as a file:// page), this rejects
+// and init() falls back to the old ecg_data.json / manual file-picker
+// behavior.
+function discoverJsonFolder() {
+  return fetch('json/manifest.json')
+    .then(r => { if (!r.ok) throw new Error('no manifest'); return r.json(); })
+    .then(list => {
+      if (!Array.isArray(list) || !list.length) throw new Error('empty manifest');
+      return list
+        .filter(name => /\.json$/i.test(name))
+        .map(name => ({ id: name.replace(/\.json$/i, ''), url: 'json/' + name }));
+    })
+    .catch(() => discoverJsonFolderViaDirectoryListing());
+}
+
+function discoverJsonFolderViaDirectoryListing() {
+  return fetch('json/')
+    .then(r => { if (!r.ok) throw new Error('json/ not found'); return r.text(); })
+    .then(html => {
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const hrefs = Array.from(doc.querySelectorAll('a[href]'))
+        .map(a => a.getAttribute('href'))
+        .filter(Boolean);
+      const seen = new Set();
+      const entries = [];
+      hrefs.forEach(href => {
+        if (!/\.json$/i.test(href)) return;
+        // hrefs may be bare filenames ("100.json") or, on some servers,
+        // full/relative paths ("/json/100.json") — normalize to just the
+        // filename so it works either way.
+        const filename = decodeURIComponent(href.split('/').filter(Boolean).pop());
+        if (seen.has(filename)) return;
+        seen.add(filename);
+        entries.push({ id: filename.replace(/\.json$/i, ''), url: 'json/' + filename });
+      });
+      return entries;
+    });
+}
+
+// Shared numeric-aware sort used for both the auto-discovered folder and
+// manually dropped/selected files.
+function sortRecordIds(ids) {
+  return ids.sort((a, b) => {
+    const na = Number(a), nb = Number(b);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return a.localeCompare(b);
+  });
+}
+
+// ─── File picker ──────────────────────────────────────────────────────────────
+// Supports: a single .json file, multiple .json files (ctrl/cmd-click or
+// drag-selecting several), or a whole folder (via the "select a folder"
+// link, or by dragging a folder straight onto the drop zone). Whatever
+// comes in is filtered down to *.json, keyed by filename (minus extension)
+// as the record id, and if there's more than one, a dropdown appears in
+// the header so you can switch between them without re-dropping anything.
+function setupFilePicker() {
+  const zone    = document.getElementById('drop-zone');
+  const newZone = zone.cloneNode(true);
+  zone.parentNode.replaceChild(newZone, zone);
+  const newInput = newZone.querySelector('#file-input');
+  const folderLink = newZone.querySelector('#folder-picker-link');
+
+  const folderInputOld = document.getElementById('folder-input');
+  const folderInput = folderInputOld.cloneNode(true);
+  folderInputOld.parentNode.replaceChild(folderInput, folderInputOld);
+
+  newZone.addEventListener('click', (e) => {
+    if (e.target === folderLink) return; // folder link has its own handler below
+    newInput.click();
+  });
+  newInput.addEventListener('change', e => handleFiles(Array.from(e.target.files)));
+
+  folderLink.addEventListener('click', (e) => { e.stopPropagation(); folderInput.click(); });
+  folderInput.addEventListener('change', e => handleFiles(Array.from(e.target.files)));
+
+  newZone.addEventListener('dragover',  e => { e.preventDefault(); newZone.classList.add('drag-over'); });
+  newZone.addEventListener('dragleave', () => newZone.classList.remove('drag-over'));
+  newZone.addEventListener('drop', async e => {
+    e.preventDefault(); newZone.classList.remove('drag-over');
+    const files = await extractFilesFromDataTransfer(e.dataTransfer);
+    handleFiles(files);
+  });
+}
+
+// Walks a DataTransfer's items, recursing into any dropped folders (via the
+// webkitGetAsEntry file-system API) so "drag the whole json/ folder in"
+// works, not just individual files. Falls back to the flat file list on
+// browsers without entry support (e.g. older Safari).
+async function extractFilesFromDataTransfer(dataTransfer) {
+  const items = dataTransfer.items;
+  if (items && items.length && items[0].webkitGetAsEntry) {
+    const entries = Array.from(items).map(it => it.webkitGetAsEntry()).filter(Boolean);
+    const files = [];
+    await Promise.all(entries.map(entry => walkEntry(entry, files)));
+    return files;
+  }
+  return Array.from(dataTransfer.files || []);
+}
+
+function walkEntry(entry, out) {
+  return new Promise((resolve) => {
+    if (!entry) { resolve(); return; }
+    if (entry.isFile) {
+      entry.file(file => { out.push(file); resolve(); }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      // readEntries only returns a batch at a time per the spec; keep
+      // calling until it returns empty to get every file in the folder.
+      const readBatch = () => {
+        reader.readEntries(async (batch) => {
+          if (!batch.length) { resolve(); return; }
+          await Promise.all(batch.map(e => walkEntry(e, out)));
+          readBatch();
+        }, () => resolve());
+      };
+      readBatch();
+    } else {
+      resolve();
+    }
+  });
+}
+
+// Filters whatever was dropped/selected down to *.json, builds the
+// recordId -> File map, shows the record dropdown if there's more than
+// one, and loads the default record (prefers "100" if present).
+function handleFiles(files) {
+  const jsonFiles = (files || []).filter(f => f && f.name && /\.json$/i.test(f.name));
+  if (!jsonFiles.length) {
+    alert('No .json files found in what was dropped/selected.');
+    return;
+  }
+
+  recordFiles = {};
+  jsonFiles.forEach(f => {
+    const id = f.name.replace(/\.json$/i, '');
+    recordFiles[id] = f;
+  });
+
+  const ids = sortRecordIds(Object.keys(recordFiles));
+
+  buildRecordSelector(ids);
+  document.getElementById('file-picker').style.display = 'none';
+  loadRecordById(recordFiles['100'] ? '100' : ids[0]);
+}
+
+// Populates/hides the header's record dropdown. Hidden entirely for a
+// single-record load so the UI looks exactly as it did before this feature.
+function buildRecordSelector(ids) {
+  const sel = document.getElementById('record-select');
+  sel.innerHTML = '';
+  if (ids.length <= 1) {
+    sel.style.display = 'none';
+    return;
+  }
+  ids.forEach(id => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = `Record ${id}`;
+    sel.appendChild(opt);
+  });
+  sel.value = recordFiles['100'] ? '100' : ids[0];
+  sel.style.display = 'inline-block';
+}
+
+document.getElementById('record-select').addEventListener('change', (e) => {
+  loadRecordById(e.target.value);
+});
+
+// Reads + parses one already-known record from recordFiles and renders it.
+// recordFiles entries are either a browser File (from a manual drop/select)
+// or a { url } object (from an auto-discovered json/ folder, see
+// discoverJsonFolder) — this handles both. Used both for the initial
+// default (100, if present) and whenever the record dropdown changes.
+function loadRecordById(id) {
+  const entry = recordFiles[id];
+  if (!entry) return;
+  currentRecordId = id;
+  const sel = document.getElementById('record-select');
+  if (sel.value !== id) sel.value = id;
+
+  document.getElementById('loading-overlay').style.display = 'flex';
+
+  if (entry.url) {
+    // Auto-discovered folder entry: fetch it.
+    setLoad(20, `Fetching ${entry.url}…`);
+    return fetch(entry.url)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => { setLoad(60, 'Parsing JSON…'); setTimeout(() => loadData(d), 50); })
+      .catch(err => setLoad(0, `Error fetching ${entry.url}: ` + err.message));
+  }
+
+  // Manual drop/select entry: it's a File, read it off disk.
+  const file = entry;
+  setLoad(20, `Reading ${file.name}…`);
+  const reader = new FileReader();
+  reader.onload = e => {
+    setLoad(60, 'Parsing JSON…');
+    setTimeout(() => {
+      try { loadData(JSON.parse(e.target.result)); }
+      catch(err) { setLoad(0, 'Error: ' + err.message); }
+    }, 50);
+  };
+  reader.onerror = () => setLoad(0, `Error reading ${file.name}`);
+  reader.readAsText(file);
+}
+
+// ─── Load new data ────────────────────────────────────────────────────────────
+document.getElementById('load-new-btn').addEventListener('click', () => {
+  data = null; activeIdx = null; LEADS = []; scatterCells = {};
+  recordFiles = {}; currentRecordId = null;
+  const sel = document.getElementById('record-select');
+  sel.innerHTML = ''; sel.style.display = 'none';
+  document.getElementById('main-grid').innerHTML = '';
+  document.getElementById('strips-grid').innerHTML = '';
+  document.getElementById('legend').innerHTML = '';
+  document.getElementById('data-info').textContent = 'hover over points to inspect beats';
+  document.getElementById('file-picker').style.display = 'flex';
+  setupFilePicker();
+});
+
+// ─── Load & render ────────────────────────────────────────────────────────────
+function loadData(d) {
+  data = d;
+  setDerivedConstants();
+  buildLeadsAndLayout();
+  setLoad(95, 'Rendering…');
+  setTimeout(() => {
+    document.getElementById('loading-overlay').style.display = 'none';
+    buildLegend();
+    buildAllScatters();
+  }, 30);
+}
+
+// ─── Legend ───────────────────────────────────────────────────────────────────
+function buildLegend() {
+  const leg = document.getElementById('legend');
+  leg.innerHTML = '';
+  LEG_LABELS.forEach((lbl, i) => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="legend-dot" style="background:${COLORS[i]}"></div>${lbl}`;
+    leg.appendChild(item);
+  });
+}
+
+// ─── Scatter plots: one per (projection, lead) combination, 3 x 2 = 6 total ───
+function buildAllScatters() {
+  scatterCells = {};
+  PROJS.forEach(proj => LEADS.forEach((lead, li) => buildScatterCell(proj, li, lead)));
+}
+
+function buildScatterCell(proj, li, lead) {
+  const svgEl = document.getElementById(`embed-svg-${proj}-${li}`);
+  if (!svgEl) return;
+  const wrap = svgEl.parentElement;
+  const wrapW = wrap.clientWidth, wrapH = wrap.clientHeight;
+  if (wrapW === 0 || wrapH === 0) return;
+
+  // The <svg> itself fills the wrap (so hover/tooltip coordinates line up),
+  // but everything is drawn inside a SQUARE plot area of side = min(w, h),
+  // centered in the available space — this is what keeps the embedding's
+  // true shape (equal x/y aspect ratio) instead of stretching it.
+  const svg = d3.select(svgEl).attr('viewBox', `0 0 ${wrapW} ${wrapH}`);
+  svg.selectAll('*').remove();
+
+  const side = Math.max(20, Math.min(wrapW, wrapH));
+  const offsetX = (wrapW - side) / 2;
+  const offsetY = (wrapH - side) / 2;
+
+  const glowId = `glow-${proj}-${li}`;
+  const defs = svg.append('defs');
+  const glow = defs.append('filter').attr('id', glowId).attr('x','-60%').attr('y','-60%').attr('width','220%').attr('height','220%');
+  glow.append('feGaussianBlur').attr('stdDeviation', '1.5').attr('result', 'coloredBlur');
+  const fm = glow.append('feMerge');
+  fm.append('feMergeNode').attr('in', 'coloredBlur');
+  fm.append('feMergeNode').attr('in', 'SourceGraphic');
+
+  const g = svg.append('g').attr('transform', `translate(${offsetX},${offsetY})`);
+
+  // Card-style square backdrop with rounded corners and a subtle border,
+  // so the square reads as an intentional plot card rather than dead space.
+  g.append('rect').attr('width', side).attr('height', side)
+    .attr('rx', 6).attr('ry', 6)
+    .attr('fill', '#fff').attr('stroke', 'var(--border)').attr('stroke-width', 1);
+
+  const inset = side * 0.11;               // slightly larger margin so both the
+  const plotSide = side - inset * 2;       // card border and tick numbers have room
+
+  const embed = getEmbedding(proj, lead), labels = data.aami_labels;
+  const xExt = d3.extent(embed, d => d[0]), yExt = d3.extent(embed, d => d[1]);
+  let xSpan = (xExt[1] - xExt[0]) || 1, ySpan = (yExt[1] - yExt[0]) || 1;
+  const pad = 0.10;
+  const xDomain = [xExt[0] - xSpan*pad, xExt[1] + xSpan*pad];
+  const yDomain = [yExt[0] - ySpan*pad, yExt[1] + ySpan*pad];
+  xSpan = xDomain[1] - xDomain[0];
+  ySpan = yDomain[1] - yDomain[0];
+
+  // Equal-aspect scale: ONE unit-per-pixel factor drives both axes, so
+  // clusters keep their true relative shape instead of being squashed to
+  // fit a wide rectangle. The shorter data axis is centered within the
+  // square rather than stretched to fill it.
+  const unitsPerPx = Math.max(xSpan, ySpan) / plotSide;
+  const xPxSpan = xSpan / unitsPerPx, yPxSpan = ySpan / unitsPerPx;
+  const xPad = (plotSide - xPxSpan) / 2, yPad = (plotSide - yPxSpan) / 2;
+
+  const xScale = d3.scaleLinear().domain(xDomain)
+    .range([inset + xPad, inset + xPad + xPxSpan]);
+  const yScale = d3.scaleLinear().domain(yDomain)
+    .range([inset + yPad + yPxSpan, inset + yPad]);
+
+  // Light background grid WITH small numeric tick labels (component values
+  // of the projection — not physically meaningful units, but useful for
+  // gauging relative scale/distance between clusters at a glance).
+  const xAx = g.append('g').attr('transform',`translate(0,${side - inset})`)
+    .call(d3.axisBottom(xScale).ticks(4).tickSize(-(plotSide)).tickFormat(d3.format('.1f')));
+  xAx.selectAll('text').attr('fill','#7a8698').style('font-family',"'JetBrains Mono',monospace").style('font-size','8px');
+  xAx.selectAll('line').attr('stroke','#eef1f5').attr('stroke-width',1);
+  const yAx = g.append('g').attr('transform',`translate(${inset},0)`)
+    .call(d3.axisLeft(yScale).ticks(4).tickSize(-(plotSide)).tickFormat(d3.format('.1f')));
+  yAx.selectAll('text').attr('fill','#7a8698').style('font-family',"'JetBrains Mono',monospace").style('font-size','8px');
+  yAx.selectAll('line').attr('stroke','#eef1f5').attr('stroke-width',1);
+  g.selectAll('.domain').remove();
+
+  // Selection ring — repositioned across all 6 cells whenever any point is hovered.
+  const ring = g.append('circle').attr('fill','none').attr('stroke-width',1.3)
+    .attr('pointer-events','none').attr('opacity',0).attr('r',5);
+
+  const order = [0,5,4,2,1,3], indices = d3.range(embed.length);
+  const BASE_R = 0.9, HOVER_R = 2.0, MAX_BASE_R = 5, MAX_HOVER_R = 7.5;
+  let currentK = 1;   // current zoom scale for this cell — dot radius grows with it
+  const baseR  = () => Math.min(BASE_R * currentK, MAX_BASE_R);
+  const hoverR = () => Math.min(HOVER_R * currentK, MAX_HOVER_R);
+
+  order.forEach(cls => {
+    g.selectAll(`.dot-${proj}-${li}-${cls}`)
+      .data(indices.filter(i => labels[i] === cls))
+      .enter().append('circle')
+        .attr('class', 'pt')
+        .attr('cx', i => xScale(embed[i][0])).attr('cy', i => yScale(embed[i][1]))
+        .attr('r', BASE_R).attr('fill', COLORS[cls]).attr('fill-opacity',0.7)
+        .attr('stroke','none').style('cursor','crosshair')
+        .on('mouseover', function(event, i) {
+          showBeat(i);
+          d3.select(this).attr('fill-opacity',1).attr('r', hoverR()).style('filter', `url(#${glowId})`);
+        })
+        .on('mousemove', (event, i) => updateTooltip(event, i))
+        .on('mouseout', function() {
+          d3.select(this).attr('fill-opacity',0.7).attr('r', baseR()).style('filter',null);
+          clearAllRings();
+          hideTooltip();
+        });
+  });
+
+  const cellKey = `${proj}_${li}`;
+  scatterCells[cellKey] = { ring, xScale, yScale, embed };
+
+  // ── Zoom/pan: lets you zoom into a dense cluster to pick apart
+  // individual points, or zoom out (scroll/drag) to reach every point.
+  // Bound to the group itself (not a separate overlay) so wheel/drag
+  // gestures work anywhere over the plot, including directly on a dot.
+  const zoom = d3.zoom()
+    .scaleExtent([1, 14])
+    .translateExtent([[inset, inset], [side - inset, side - inset]])
+    .extent([[inset, inset], [side - inset, side - inset]])
+    .on('zoom', (event) => {
+      const zx = event.transform.rescaleX(xScale);
+      const zy = event.transform.rescaleY(yScale);
+      currentK = event.transform.k;
+
+      g.selectAll('circle.pt')
+        .attr('cx', i => zx(embed[i][0]))
+        .attr('cy', i => zy(embed[i][1]))
+        .attr('r', baseR());
+
+      xAx.call(d3.axisBottom(zx).ticks(4).tickSize(-(plotSide)).tickFormat(d3.format('.1f')));
+      xAx.selectAll('text').attr('fill','#7a8698').style('font-family',"'JetBrains Mono',monospace").style('font-size','8px');
+      xAx.selectAll('line').attr('stroke','#eef1f5').attr('stroke-width',1);
+      yAx.call(d3.axisLeft(zy).ticks(4).tickSize(-(plotSide)).tickFormat(d3.format('.1f')));
+      yAx.selectAll('text').attr('fill','#7a8698').style('font-family',"'JetBrains Mono',monospace").style('font-size','8px');
+      yAx.selectAll('line').attr('stroke','#eef1f5').attr('stroke-width',1);
+      g.selectAll('.domain').remove();
+
+      scatterCells[cellKey].xScale = zx;
+      scatterCells[cellKey].yScale = zy;
+      if (activeIdx !== null && embed[activeIdx]) {
+        ring.attr('cx', zx(embed[activeIdx][0])).attr('cy', zy(embed[activeIdx][1]));
+      }
+    });
+  g.call(zoom).style('cursor', 'grab');
+}
+
+// Position the selection ring at the given beat index in every one of the 6 cells.
+function highlightAll(idx, label) {
+  Object.values(scatterCells).forEach(cell => {
+    const coords = cell.embed[idx];
+    if (!coords) return;
+    cell.ring
+      .attr('cx', cell.xScale(coords[0])).attr('cy', cell.yScale(coords[1]))
+      .attr('stroke', COLORS[label]).attr('opacity',1);
+  });
+}
+function clearAllRings() {
+  Object.values(scatterCells).forEach(cell => cell.ring.attr('opacity',0));
+}
+
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+const tooltip = document.getElementById('tooltip');
+function updateTooltip(event, i) {
+  tooltip.textContent = `#${i} · ${CLASSES[data.aami_labels[i]]}`;
+  tooltip.style.opacity = 1;
+  tooltip.style.left = (event.clientX + 14) + 'px';
+  tooltip.style.top  = (event.clientY - 28) + 'px';
+}
+function hideTooltip() { tooltip.style.opacity = 0; }
+
+// ─── Strip drag-to-pan (native scrollbar/trackpad/shift-wheel still work too) ──
+function enableStripDragScroll(el) {
+  let isDown = false, startX = 0, startScrollLeft = 0;
+  el.addEventListener('mousedown', (event) => {
+    isDown = true;
+    startX = event.pageX;
+    startScrollLeft = el.scrollLeft;
+  });
+  window.addEventListener('mouseup', () => { isDown = false; });
+  window.addEventListener('mousemove', (event) => {
+    if (!isDown) return;
+    event.preventDefault();
+    el.scrollLeft = startScrollLeft - (event.pageX - startX);
+  });
+}
+
+// ─── Show beat: updates both beat plots, both strips, and all selection rings ──
+function showBeat(idx) {
+  if (!data) return;
+  activeIdx = idx;
+  const label = data.aami_labels[idx];
+  const { seg_start, seg_end } = getSegBounds(idx);
+
+  LEADS.forEach((lead, li) => {
+    drawSegmented(idx, label, lead, li);
+    drawStrip(idx, label, seg_start, seg_end, lead, li);
+  });
+
+  highlightAll(idx, label);
+}
+
+// ─── ECG paper grid ───────────────────────────────────────────────────────────
+// xDomain and yDomain in the *scale's input units* (seconds for strip, samples for beat)
+// MAJOR_T_UNITS / MINOR_T_UNITS are the grid spacings in those same units
+function drawEcgGrid(g, xScale, yScale, xDomain, yDomain, w, h, majorTUnits, minorTUnits) {
+  const [x0, x1] = xDomain;
+  const [y0, y1] = yDomain;
+
+  const MAJOR_A = (y1 - y0) / 5;
+  const MINOR_A = MAJOR_A / 5;
+
+  // Minor vertical
+  for (let x = Math.ceil(x0/minorTUnits)*minorTUnits; x <= x1 + 1e-9; x += minorTUnits)
+    g.append('line').attr('x1',xScale(x)).attr('x2',xScale(x)).attr('y1',0).attr('y2',h)
+      .attr('stroke','rgba(220,50,50,0.2)').attr('stroke-width',0.5);
+  // Minor horizontal
+  for (let y = Math.floor(y0/MINOR_A)*MINOR_A; y <= y1 + 1e-9; y += MINOR_A)
+    g.append('line').attr('x1',0).attr('x2',w).attr('y1',yScale(y)).attr('y2',yScale(y))
+      .attr('stroke','rgba(220,50,50,0.2)').attr('stroke-width',0.5);
+  // Major vertical
+  for (let x = Math.ceil(x0/majorTUnits)*majorTUnits; x <= x1 + 1e-9; x += majorTUnits)
+    g.append('line').attr('x1',xScale(x)).attr('x2',xScale(x)).attr('y1',0).attr('y2',h)
+      .attr('stroke','rgba(200,40,40,0.5)').attr('stroke-width',1);
+  // Major horizontal
+  for (let y = Math.floor(y0/MAJOR_A)*MAJOR_A; y <= y1 + 1e-9; y += MAJOR_A)
+    g.append('line').attr('x1',0).attr('x2',w).attr('y1',yScale(y)).attr('y2',yScale(y))
+      .attr('stroke','rgba(200,40,40,0.5)').attr('stroke-width',1);
+}
+
+// ─── Segmented beat (one per lead) ─────────────────────────────────────────────
+function drawSegmented(idx, label, lead, li) {
+  const signal = data.heartbeats_data[lead][idx];
+
+  const container = document.getElementById(`beat-container-${li}`);
+  container.innerHTML = '';
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svgEl.style.width = '100%'; svgEl.style.height = '100%';
+  container.appendChild(svgEl);
+
+  const W = container.clientWidth, H = container.clientHeight;
+  const m = { top: 10, right: 10, bottom: 22, left: 32 };
+  const w = W - m.left - m.right, h = H - m.top - m.bottom;
+
+  const svg = d3.select(svgEl).attr('viewBox',`0 0 ${W} ${H}`);
+  svg.append('rect').attr('width',W).attr('height',H).attr('fill','#fff');
+  const g = svg.append('g').attr('transform',`translate(${m.left},${m.top})`);
+  g.append('rect').attr('width',w).attr('height',h).attr('fill','#fff');
+
+  // X in seconds (relative to segment start = 0)
+  const tMax   = (signal.length - 1) / FS;
+  const xScale = d3.scaleLinear().domain([0, tMax]).range([0, w]);
+
+  const yExt  = d3.extent(signal);
+  const yPad  = (yExt[1]-yExt[0]) * 0.15 || 0.1;
+  const yMin  = yExt[0] - yPad, yMax = yExt[1] + yPad;
+  const yScale = d3.scaleLinear().domain([yMin, yMax]).range([h, 0]);
+
+  // ECG grid: major 0.2 s, minor 0.04 s
+  drawEcgGrid(g, xScale, yScale, [0, tMax], [yMin, yMax], w, h, 0.2, 0.04);
+
+  // Signal — black line
+  const path = g.append('path').datum(signal)
+    .attr('fill','none').attr('stroke','#111').attr('stroke-width',1.3)
+    .attr('stroke-linecap','round').attr('stroke-linejoin','round')
+    .attr('d', d3.line().x((d,i) => xScale(i/FS)).y(d => yScale(d)).curve(d3.curveLinear));
+
+  const len = path.node().getTotalLength();
+  path.attr('stroke-dasharray',len).attr('stroke-dashoffset',len)
+      .transition().duration(350).ease(d3.easeLinear).attr('stroke-dashoffset',0);
+
+  // X-axis: seconds
+  const xAx = g.append('g').attr('transform',`translate(0,${h})`)
+    .call(d3.axisBottom(xScale).ticks(4).tickSize(3).tickFormat(d => d.toFixed(2)+'s'));
+  xAx.selectAll('text').attr('fill','#888').style('font-family',"'JetBrains Mono',monospace").style('font-size','7px');
+  xAx.select('.domain').attr('stroke','#ccc'); xAx.selectAll('.tick line').attr('stroke','#ccc');
+
+  // Y-axis
+  const yAx = g.append('g').call(d3.axisLeft(yScale).ticks(4).tickFormat(d=>d.toFixed(2)).tickSize(3));
+  yAx.selectAll('text').attr('fill','#888').style('font-family',"'JetBrains Mono',monospace").style('font-size','7px');
+  yAx.select('.domain').attr('stroke','#ccc'); yAx.selectAll('.tick line').attr('stroke','#ccc');
+
+  g.append('text').attr('x',w/2).attr('y',h+19).attr('text-anchor','middle')
+    .style('font-family',"'JetBrains Mono',monospace").style('font-size','8px').attr('fill','#888')
+    .text('time (s)');
+
+  // Class label now lives beneath the chart (see beat-plot-label), not as
+  // an in-chart watermark, so it never overlaps the axis/tick numbers.
+  const classLabelEl = document.getElementById(`beat-class-${li}`);
+  if (classLabelEl) {
+    classLabelEl.textContent = CLASSES[label];
+    classLabelEl.style.color = COLORS[label];
+  }
+}
+
+// ─── ECG strip (one per lead) ───────────────────────────────────────────────────
+function drawStrip(idx, label, seg_start, seg_end, lead, li) {
+  const { strip, offset, startSample, rpeakSample } = getStrip(lead, idx);
+
+  const container = document.getElementById(`strip-container-${li}`);
+  container.innerHTML = '';
+  const svgEl = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  container.appendChild(svgEl);
+  enableStripDragScroll(container);
+
+  const viewportW = container.clientWidth;
+  const H = container.clientHeight;
+  const m = { top: 12, right: 22, bottom: 20, left: 56 };
+
+  // Render at a fixed px/second density (wider than the visible viewport when
+  // the strip covers more than a few seconds), so the browser's native
+  // horizontal scrollbar lets the person pan through the whole ±WIN_SEC window.
+  const durationSec = (strip.length - 1) / FS;
+  const totalW = Math.max(viewportW, Math.round(durationSec * STRIP_PX_PER_SEC) + m.left + m.right);
+  const w = totalW - m.left - m.right, h = H - m.top - m.bottom;
+
+  svgEl.setAttribute('width', totalW);
+  svgEl.setAttribute('height', H);
+  svgEl.style.display = 'block';
+
+  const svg = d3.select(svgEl).attr('viewBox',`0 0 ${totalW} ${H}`);
+  svg.append('rect').attr('width',totalW).attr('height',H).attr('fill','#fff');
+  const g = svg.append('g').attr('transform',`translate(${m.left},${m.top})`);
+  g.append('rect').attr('width',w).attr('height',h).attr('fill','#fff');
+
+  // X domain: ABSOLUTE time in seconds
+  const tStart = startSample / FS;
+  const tEnd   = (startSample + strip.length - 1) / FS;
+  const xScale = d3.scaleLinear().domain([tStart, tEnd]).range([0, w]);
+
+  const yExt  = d3.extent(strip);
+  const yPad  = (yExt[1]-yExt[0]) * 0.15 || 0.1;
+  const yMin  = yExt[0] - yPad, yMax = yExt[1] + yPad;
+  const yScale = d3.scaleLinear().domain([yMin, yMax]).range([h, 0]);
+
+  // ECG grid in absolute time (major 0.2 s, minor 0.04 s)
+  drawEcgGrid(g, xScale, yScale, [tStart, tEnd], [yMin, yMax], w, h, 0.2, 0.04);
+
+  // ── Beat segment highlight ────────────────────────────────────────────────
+  const tSegStart = seg_start / FS;
+  const tSegEnd   = seg_end   / FS;
+  const clipTStart = Math.max(tStart, tSegStart);
+  const clipTEnd   = Math.min(tEnd,   tSegEnd);
+
+  if (clipTEnd > clipTStart) {
+    // Filled region
+    g.append('rect')
+      .attr('x', xScale(clipTStart)).attr('y', 0)
+      .attr('width',  xScale(clipTEnd) - xScale(clipTStart))
+      .attr('height', h)
+      .attr('fill', COLORS[label]).attr('opacity', 0.10);
+
+    // Left boundary (solid, not dashed)
+    g.append('line')
+      .attr('x1',xScale(clipTStart)).attr('x2',xScale(clipTStart)).attr('y1',0).attr('y2',h)
+      .attr('stroke',COLORS[label]).attr('stroke-width',1.2).attr('opacity',0.55);
+    // Right boundary
+    g.append('line')
+      .attr('x1',xScale(clipTEnd)).attr('x2',xScale(clipTEnd)).attr('y1',0).attr('y2',h)
+      .attr('stroke',COLORS[label]).attr('stroke-width',1.2).attr('opacity',0.55);
+  }
+
+  // ── R-peak: small triangle marker at top of plot (no vertical line) ───────
+  const tRpeak = rpeakSample / FS;
+  const xR = xScale(tRpeak);
+  // Downward-pointing triangle above the signal area
+  g.append('polygon')
+    .attr('points', `${xR-5},0 ${xR+5},0 ${xR},8`)
+    .attr('fill', COLORS[label]).attr('opacity', 0.85);
+  g.append('text').attr('x', xR).attr('y', -2).attr('text-anchor','middle')
+    .style('font-family',"'JetBrains Mono',monospace").style('font-size','7px')
+    .attr('fill', COLORS[label]).attr('opacity',0.85)
+    .text(`R  ${fmtSec(rpeakSample)}`);
+
+  // ── Signal — black ────────────────────────────────────────────────────────
+  g.append('path').datum(strip)
+    .attr('fill','none').attr('stroke','#111').attr('stroke-width',1.2)
+    .attr('stroke-linecap','round').attr('stroke-linejoin','round')
+    .attr('d', d3.line()
+      .x((d,i) => xScale((startSample + i) / FS))
+      .y(d => yScale(d))
+      .curve(d3.curveLinear));
+
+  // ── X-axis: absolute time in seconds ─────────────────────────────────────
+  const xAx = g.append('g').attr('transform',`translate(0,${h})`)
+    .call(d3.axisBottom(xScale).ticks(Math.round(durationSec * 2)).tickSize(3)
+      .tickFormat(d => d.toFixed(1) + 's'));
+  xAx.selectAll('text').attr('fill','#888').style('font-family',"'JetBrains Mono',monospace").style('font-size','9px');
+  xAx.select('.domain').attr('stroke','#ccc'); xAx.selectAll('.tick line').attr('stroke','#ccc');
+
+  // ── Y-axis ────────────────────────────────────────────────────────────────
+  const yAx = g.append('g').call(d3.axisLeft(yScale).ticks(4).tickFormat(d=>d.toFixed(2)).tickSize(3));
+  yAx.selectAll('text').attr('fill','#888').style('font-family',"'JetBrains Mono',monospace").style('font-size','9px');
+  yAx.select('.domain').attr('stroke','#ccc'); yAx.selectAll('.tick line').attr('stroke','#ccc');
+
+  // Y-axis label
+  g.append('text').attr('transform','rotate(-90)').attr('x',-h/2).attr('y',-42)
+    .attr('text-anchor','middle')
+    .style('font-family',"'JetBrains Mono',monospace").style('font-size','10px').attr('fill','#888')
+    .text('amplitude');
+
+  // Class watermark
+  g.append('text').attr('x',w-4).attr('y',12).attr('text-anchor','end')
+    .style('font-family',"'Inter',sans-serif").style('font-size','9.5px').style('font-weight','700')
+    .attr('fill',COLORS[label]).attr('opacity',0.35).text(CLASSES[label]);
+
+  // Center the scrollable viewport on the R-peak of the selected beat
+  const targetScrollLeft = m.left + xR - viewportW / 2;
+  container.scrollLeft = Math.max(0, Math.min(totalW - viewportW, targetScrollLeft));
+}
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  if (!data) return;
+  fitMainGridHeight();
+  buildAllScatters();
+  if (activeIdx !== null) showBeat(activeIdx);
+});
+</script>
+</body>
+</html>
