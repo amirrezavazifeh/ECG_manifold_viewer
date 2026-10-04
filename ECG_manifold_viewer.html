@@ -39,9 +39,10 @@
     display: flex; align-items: center; justify-content: space-between; gap: 20px;
     padding: 10px 24px; border-bottom: 1px solid var(--border);
     background: var(--surface); flex-shrink: 0;
+    flex-wrap: wrap;   /* on narrow windows, items drop to a new line instead of being cut */
     box-shadow: 0 1px 4px rgba(0,0,0,0.06);
   }
-  .header-left { min-width: 0; }
+  .header-left { flex: 0 0 auto; max-width: 100%; }  /* never shrink the title/info block */
   .logo { font-size: 12px; font-weight: 800; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent); }
   .data-footer {
     padding: 8px 24px; border-top: 1px solid var(--border);
@@ -54,9 +55,9 @@
   .data-footer .disclaimer { color: var(--text); font-weight: 600; }
   .subtitle {
     font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    white-space: normal;   /* wrap rather than truncate with "…" */
   }
-  .legend { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; flex-shrink: 0; }
+  .legend { display: flex; gap: 6px 12px; flex-wrap: wrap; align-items: center; flex: 1 1 0; min-width: 240px; }
   .legend-item { display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); }
   .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .load-new-btn {
@@ -146,13 +147,12 @@
   /* ── Strips: two ECG strips stacked — grows to absorb whatever viewport
      space isn't used by the (now fixed-height) grid above. ── */
   .strips-section {
-    flex: 1 0 auto;
+    flex: 0 0 auto;      /* fixed size: doesn't stretch to fill leftover window space */
     display: flex; flex-direction: column;
     overflow: hidden;
-    min-height: 440px;   /* ~220px per strip; page scrolls if the window is shorter */
   }
   .strip-cell {
-    flex: 1 0 220px; display: flex; flex-direction: column; overflow: hidden;
+    flex: 0 0 180px; display: flex;   /* strip height (header + plot); page scrolls if needed */ flex-direction: column; overflow: hidden;
     border-bottom: 1px solid var(--border2);
   }
   .strip-cell:last-child { border-bottom: none; }
