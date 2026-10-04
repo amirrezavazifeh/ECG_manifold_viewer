@@ -25,10 +25,13 @@
     background: var(--bg);
     color: var(--text);
     font-family: 'Inter', sans-serif;
-    height: 100vh;
+    /* Fill at least the viewport, but grow taller (and scroll) when the
+       content needs more room than the window offers. */
+    min-height: 100vh;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   /* ── Header ── */
@@ -75,9 +78,8 @@
 
   /* ── Content column (full width now that the sidebar is gone) ── */
   .content-col {
-    flex: 1;
+    flex: 1 0 auto;
     display: flex; flex-direction: column;
-    overflow: hidden;
   }
 
   /* ── Main grid: embeddings sit in a 1x4 row spanning the full grid
@@ -92,6 +94,7 @@
      unstyled fallback before the first fit runs. ── */
   .main-grid {
     flex: 0 0 300px;
+    min-height: 0;
     display: grid;
     grid-template-columns: 1.1fr 1.1fr 1.1fr 1.1fr 0.6fr;
     grid-template-rows: repeat(2, 1fr);
@@ -143,13 +146,13 @@
   /* ── Strips: two ECG strips stacked — grows to absorb whatever viewport
      space isn't used by the (now fixed-height) grid above. ── */
   .strips-section {
-    flex: 1;
+    flex: 1 0 auto;
     display: flex; flex-direction: column;
     overflow: hidden;
-    min-height: 260px;
+    min-height: 440px;   /* ~220px per strip; page scrolls if the window is shorter */
   }
   .strip-cell {
-    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    flex: 1 0 220px; display: flex; flex-direction: column; overflow: hidden;
     border-bottom: 1px solid var(--border2);
   }
   .strip-cell:last-child { border-bottom: none; }
